@@ -1,0 +1,17 @@
+certifi==2026.6.17
+charset-normalizer==3.4.7
+et_xmlfile==2.0.0
+idna==3.18
+lxml==6.1.1
+openpyxl==3.1.5
+PyMuPDF==1.27.2.3
+PyPDF2==3.0.1
+python-docx==1.2.0
+requests==2.34.2
+typing_extensions==4.15.0
+urllib3==2.7.0
+# 本地模型依赖（GPU加速）
+torch>=2.0.0
+transformers>=4.30.0
+accelerate>=0.20.0
+bitsandbytes>=0.40.0
