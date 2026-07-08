@@ -24,12 +24,12 @@ import logging
 import logging.config
 import time
 
-from config import LOGGING_CONFIG, LLM_CONFIG
-from utils.resume_reader import get_all_resumes, get_position_list
-from utils.evaluation_parser import get_all_evaluation_criteria, format_evaluation_criteria
+from config import LOGGING_CONFIG, LLM_CONFIG, PRIORITY_LEVELS
+from utils.resume_reader import get_all_resumes, get_position_list, read_resumes_for_position_with_llm, read_resumes_for_position
+from utils.evaluation_parser import get_evaluation_criteria, get_evaluation_criteria_with_llm, format_evaluation_criteria, get_all_evaluation_criteria
 from utils.data_processor import process_evaluation_results, generate_summary_report
 from utils.excel_writer import write_all_positions_excel
-from utils.resource_manager import set_llm_mode, match_position_name
+from utils.resource_manager import set_llm_mode, match_position_name, match_resume_dir, match_eval_doc, get_all_resume_dirs
 from local_llm.local_model import detect_gpu, call_local_model
 from llm.remote_llm import call_llm_api, parse_llm_response, build_evaluation_prompt
 
@@ -77,6 +77,19 @@ def evaluate_candidate(candidate, position_key, use_llm=False, use_local=False):
                 logger.info(f"本地模型原始响应(前500字): {response[:500]}")
                 result = parse_llm_response(response)
                 if result:
+                    priority = result.get('priority', 'P3')
+                    criteria = get_all_evaluation_criteria().get(position_key, {})
+                    priority_levels = criteria.get('priority_levels', [])
+                    
+                    action_from_doc = ''
+                    for level in priority_levels:
+                        if level.get('level') == priority:
+                            action_from_doc = level.get('action', '')
+                            break
+                    
+                    if action_from_doc:
+                        result['suggested_action'] = action_from_doc
+                    
                     return result
                 logger.warning(f"解析本地模型响应失败: {position_key} - {candidate.get('name', 'unknown')}")
                 logger.warning(f"本地模型响应内容(前300字): {response[:300]}")
@@ -89,28 +102,62 @@ def evaluate_candidate(candidate, position_key, use_llm=False, use_local=False):
             if response:
                 result = parse_llm_response(response)
                 if result:
+                    priority = result.get('priority', 'P3')
+                    criteria = get_all_evaluation_criteria().get(position_key, {})
+                    priority_levels = criteria.get('priority_levels', [])
+                    
+                    action_from_doc = ''
+                    for level in priority_levels:
+                        if level.get('level') == priority:
+                            action_from_doc = level.get('action', '')
+                            break
+                    
+                    if action_from_doc:
+                        result['suggested_action'] = action_from_doc
+                    
                     return result
                 logger.warning(f"解析远程LLM响应失败: {position_key} - {candidate.get('name', 'unknown')}")
         
-        # 默认规则评估（简单匹配）
+        # 默认规则评估（按维度计算）
         criteria = get_all_evaluation_criteria().get(position_key, {})
         dimensions = criteria.get('dimensions', [])
         
         match_score = 0
-        matched_count = 0
-        total_items = 0
+        dimension_scores = {}
+        dimension_details = {}
         
-        full_text = candidate.get('full_text', '') + ' ' + candidate.get('skills', '')
+        full_text = (candidate.get('full_text', '') + ' ' + 
+                     candidate.get('skills', '') + ' ' + 
+                     candidate.get('summary', '')).lower()
         
         for dim in dimensions:
+            dim_id = dim.get('id', '')
+            dim_weight = dim.get('weight', 0)
             items = dim.get('standard_items', [])
-            total_items += len(items)
+            
+            matched_items = []
             for item in items:
-                if item and item in full_text:
-                    matched_count += 1
+                if item and item.lower() in full_text:
+                    matched_items.append(item)
+            
+            dim_score = len(matched_items)
+            max_score = 5
+            
+            if dim_score > max_score:
+                dim_score = max_score
+            
+            weighted_score = int((dim_score / max_score) * dim_weight)
+            
+            dimension_scores[dim_id] = dim_score
+            dimension_details[dim_id] = {
+                'matched_items': len(matched_items),
+                'total_items': len(items),
+                'weighted_score': str(weighted_score)
+            }
+            
+            match_score += weighted_score
         
-        if total_items > 0:
-            match_score = int((matched_count / total_items) * 100)
+        match_score = min(match_score, 100)
         
         priority = 'P3'
         if match_score >= 85:
@@ -120,17 +167,27 @@ def evaluate_candidate(candidate, position_key, use_llm=False, use_local=False):
         elif match_score >= 50:
             priority = 'P2'
         
+        priority_levels = criteria.get('priority_levels', [])
+        action = ''
+        for level in priority_levels:
+            if level.get('level') == priority:
+                action = level.get('action', '')
+                break
+        
+        if not action:
+            action = PRIORITY_LEVELS.get(priority, {}).get('action', '储备人才')
+        
         return {
             'match_score': match_score,
             'priority': priority,
-            'core_strengths': f"匹配了 {matched_count}/{total_items} 个评估项",
+            'core_strengths': f"匹配了 {sum(d.get('matched_items', 0) for d in dimension_details.values())} 个评估项",
             'main_risks': '',
-            'suggested_action': '联系面试' if priority in ['P0', 'P1'] else '储备人才',
+            'suggested_action': action,
             'rating_reason': f"规则匹配得分: {match_score}%",
             'intention_modules': candidate.get('position', ''),
             'preliminary_info': candidate.get('experience', '') + ' ' + candidate.get('education', ''),
-            'dimension_scores': {},
-            'dimension_details': {}
+            'dimension_scores': dimension_scores,
+            'dimension_details': dimension_details
         }
     
     except Exception as e:
@@ -186,11 +243,12 @@ def run_evaluation(use_llm=False, use_local=False, positions=None):
     运行完整的评估流程
     
     执行以下步骤：
-    1. 读取简历文件
-    2. 解析评估标准
-    3. 评估候选人（显示进度条）
-    4. 处理评估结果
-    5. 生成Excel文件
+    1. 匹配资源：根据岗位关键词匹配简历目录和评估标准文件
+    2. 读取简历文件：只读取匹配的简历目录下的PDF简历
+    3. 解析评估标准：只读取匹配的评估标准文件
+    4. 评估候选人：逐个简历与评估标准一起发送给大模型评估
+    5. 处理评估结果：排序、分组、统计、生成报告
+    6. 生成Excel文件：输出各岗位评估结果和汇总报告
     
     评估方式选择：
     - use_local=True: 使用本地模型评估（GPU加速）
@@ -234,28 +292,76 @@ def run_evaluation(use_llm=False, use_local=False, positions=None):
     
     logger.info("")
     
-    logger.info("步骤1/5: 读取简历文件...")
-    all_resumes = get_all_resumes()
+    logger.info("步骤1/4: 匹配资源...")
     
     if positions:
-        matched_resumes = {}
+        all_resumes = {}
+        all_criteria = {}
+        
         for user_input in positions:
-            matched_name = match_position_name(user_input)
-            if matched_name and matched_name in all_resumes:
-                matched_resumes[matched_name] = all_resumes[matched_name]
-                logger.info(f"  岗位匹配: '{user_input}' -> '{matched_name}'")
+            matched_dir_name = match_position_name(user_input)
+            resume_dir = match_resume_dir(user_input)
+            eval_doc_path = match_eval_doc(user_input)
+            
+            if not resume_dir:
+                logger.warning(f"  未匹配到简历目录: '{user_input}'")
+                continue
+            
+            if not eval_doc_path:
+                logger.warning(f"  未匹配到评估标准文件: '{user_input}'")
+                continue
+            
+            logger.info(f"  岗位匹配: '{user_input}'")
+            logger.info(f"    简历目录: {resume_dir}")
+            logger.info(f"    评估标准: {eval_doc_path}")
+            
+            if use_llm:
+                candidates = read_resumes_for_position_with_llm(matched_dir_name, resume_dir)
+                criteria = get_evaluation_criteria_with_llm(user_input)
             else:
-                logger.warning(f"  未匹配到岗位: '{user_input}'")
+                candidates = read_resumes_for_position(matched_dir_name, resume_dir)
+                criteria = get_evaluation_criteria(user_input)
+            
+            all_resumes[matched_dir_name] = candidates
+            all_criteria[matched_dir_name] = criteria
+            
+            logger.info(f"    读取简历: {len(candidates)}份")
+            logger.info(f"    评估维度: {len(criteria['dimensions'])}个")
+    
+    else:
+        logger.info("  评估全部岗位，自动扫描资源...")
         
-        if not matched_resumes:
-            available = list(all_resumes.keys())
-            logger.error(f"未匹配到任何岗位，输入: {positions}，可用岗位: {available}")
-            return {}
+        resume_dirs = get_all_resume_dirs()
         
-        all_resumes = matched_resumes
+        all_resumes = {}
+        all_criteria = {}
+        
+        for dir_name, resume_dir in resume_dirs.items():
+            logger.info(f"  处理岗位: {dir_name}")
+            
+            eval_doc_path = match_eval_doc(dir_name)
+            if not eval_doc_path:
+                logger.warning(f"    未匹配到评估标准文件，跳过")
+                continue
+            
+            logger.info(f"    简历目录: {resume_dir}")
+            logger.info(f"    评估标准: {eval_doc_path}")
+            
+            if use_llm:
+                candidates = read_resumes_for_position_with_llm(dir_name, resume_dir)
+                criteria = get_evaluation_criteria_with_llm(dir_name)
+            else:
+                candidates = read_resumes_for_position(dir_name, resume_dir)
+                criteria = get_evaluation_criteria(dir_name)
+            
+            all_resumes[dir_name] = candidates
+            all_criteria[dir_name] = criteria
+            
+            logger.info(f"    读取简历: {len(candidates)}份")
+            logger.info(f"    评估维度: {len(criteria['dimensions'])}个")
     
     total_candidates = sum(len(candidates) for candidates in all_resumes.values())
-    logger.info(f"  共读取 {total_candidates} 份简历")
+    logger.info(f"\n  共匹配 {len(all_resumes)} 个岗位，读取 {total_candidates} 份简历")
     
     if total_candidates == 0:
         logger.error("未读取到任何简历，请检查数据目录配置")
@@ -263,16 +369,7 @@ def run_evaluation(use_llm=False, use_local=False, positions=None):
     
     logger.info("")
     
-    logger.info("步骤2/5: 解析评估标准...")
-    all_criteria = get_all_evaluation_criteria()
-    
-    for position, criteria in all_criteria.items():
-        if position in all_resumes:
-            logger.info(f"  {position}岗位: {len(criteria['dimensions'])}个评估维度, {len(criteria['priority_levels'])}个优先级等级")
-    
-    logger.info("")
-    
-    logger.info("步骤3/5: 评估候选人...")
+    logger.info("步骤2/4: 评估候选人...")
     
     all_evaluated = {}
     total_processed = 0
@@ -294,7 +391,7 @@ def run_evaluation(use_llm=False, use_local=False, positions=None):
     
     logger.info("")
     
-    logger.info("步骤4/5: 处理评估结果...")
+    logger.info("步骤3/4: 处理评估结果...")
     processed = process_evaluation_results(all_evaluated)
     
     report = generate_summary_report(processed)
@@ -302,9 +399,9 @@ def run_evaluation(use_llm=False, use_local=False, positions=None):
     
     logger.info("")
     
-    logger.info("步骤5/5: 生成Excel文件...")
+    logger.info("步骤4/4: 生成Excel文件...")
     
-    file_paths = write_all_positions_excel(processed)
+    file_paths = write_all_positions_excel(processed, criteria_dict=all_criteria)
     logger.info("")
     logger.info("生成的文件:")
     for position, path in file_paths.items():

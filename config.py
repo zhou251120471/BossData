@@ -38,9 +38,9 @@ COMMON_CONFIG = {
     'output_template_path': os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'OutputResultTemplate', '简历推荐信息汇总.xlsx'),
     
     'output_columns': [
-        '序号', '姓名', '手机号', '性别', '年龄', '学历', '工作经验（年限）',
-        '核心技能/工具', '核心亮点', '主要差距', '意向（擅长）模块', '应聘岗位',
-        '前期信息了解', '综合匹配度', '优先级', '定级理由', '处理动作'
+        '序号', '姓名', '手机号', '性别', '年龄', '最高学历', '教育背景详情',
+        '工作经验（年限）', '核心技能/工具', '核心亮点', '主要差距', '意向（擅长）模块',
+        '应聘岗位', '期望月薪', '前期信息了解', '综合匹配度', '优先级', '处理动作'
     ],
     
     'priority_levels': {
@@ -50,35 +50,7 @@ COMMON_CONFIG = {
         'P3': {'name': '暂不推荐', 'min_score': 0, 'max_score': 49, 'action': '婉拒或转推荐'}
     },
     
-    'priority_order': ['P0', 'P1', 'P2', 'P3'],
-    
-    'default_evaluation_dimensions': [
-        {'id': 'D1', 'name': '核心技能匹配度', 'weight': 30, 'standard': '掌握岗位所需的核心技术栈和技能'},
-        {'id': 'D2', 'name': '经验年限与学历', 'weight': 25, 'standard': '具备相关工作经验和学历背景'},
-        {'id': 'D3', 'name': '项目经验与产出', 'weight': 25, 'standard': '有相关项目经验和实际产出成果'},
-        {'id': 'D4', 'name': '综合能力', 'weight': 20, 'standard': '具备良好的学习能力、沟通能力和团队协作能力'}
-    ],
-    
-    'evaluation_dimensions': {
-        '前端': [
-            {'id': 'D1', 'name': '核心技术栈匹配度', 'weight': 30, 'standard': '精通Vue3(Vuex/Pinia/Composition API)+TypeScript，理解框架底层原理（硬门槛）'},
-            {'id': 'D2', 'name': '经验年限与学历', 'weight': 20, 'standard': '本科及以上计算机/软件相关 + 5年以上前端经验（3年以上Vue生态）'},
-            {'id': 'D3', 'name': '项目复杂度与产出', 'weight': 25, 'standard': '企业级应用/组件库开发/性能优化/复杂业务交互场景落地'},
-            {'id': 'D4', 'name': '工程化与架构能力', 'weight': 25, 'standard': 'Webpack/Vite构建、CI/CD、微前端(qiankun等)、组件库封装、带团队/技术攻坚'}
-        ],
-        '测试': [
-            {'id': 'D1', 'name': '技术栈匹配度', 'weight': 25, 'standard': '精通接口测试、自动化测试、性能测试等核心技术栈'},
-            {'id': 'D2', 'name': '经验年限与学历', 'weight': 20, 'standard': '本科及以上 + 3年以上测试经验，中高级需5年以上'},
-            {'id': 'D3', 'name': '自动化与工程能力', 'weight': 25, 'standard': '能搭建自动化测试框架，熟悉CI/CD流程，掌握Python等编程语言'},
-            {'id': 'D4', 'name': '团队管理与业务能力', 'weight': 30, 'standard': '具备团队管理经验，熟悉财务/供应链业务优先'}
-        ],
-        'UX': [
-            {'id': 'D1', 'name': 'B端设计经验深度', 'weight': 30, 'standard': '5年以上B端设计经验，有成功商业化产品/从0到1设计落地经验'},
-            {'id': 'D2', 'name': '多端设计能力', 'weight': 25, 'standard': '可视化大屏、Web端、iOS/Android移动端覆盖度（大屏为加分项）'},
-            {'id': 'D3', 'name': '工具与方法论', 'weight': 20, 'standard': '精通Figma/Sketch/MasterGo/PS/AI等，能构建可持续化设计规范'},
-            {'id': 'D4', 'name': '作品集与产出质量', 'weight': 25, 'standard': '附带作品集（B端商业化案例），细节像素级完美，有财务设计经验加分'}
-        ]
-    }
+    'priority_order': ['P0', 'P1', 'P2', 'P3']
 }
 
 # ==================== LLM配置（远程大模型） ====================
@@ -264,5 +236,3 @@ OUTPUT_TEMPLATE_PATH = COMMON_CONFIG['output_template_path']
 OUTPUT_COLUMNS = COMMON_CONFIG['output_columns']
 PRIORITY_LEVELS = COMMON_CONFIG['priority_levels']
 PRIORITY_ORDER = COMMON_CONFIG['priority_order']
-EVALUATION_DIMENSIONS = COMMON_CONFIG['evaluation_dimensions']
-DEFAULT_EVALUATION_DIMENSIONS = COMMON_CONFIG['default_evaluation_dimensions']

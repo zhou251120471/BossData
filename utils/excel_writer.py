@@ -264,6 +264,11 @@ def write_position_excel(position_key, candidates, output_dir=None, dimensions=N
     创建一个包含该岗位所有候选人评估结果的Excel文件，使用模板文件保持格式一致性。
     支持动态评估维度字段，在"综合匹配度"字段前插入各维度匹配度。
     
+    关键逻辑：
+    1. 学历字段整合：将最高学历的学校、专业信息合并到学历字段中
+    2. 动态维度插入：根据评估标准文件中的维度数量动态插入列
+    3. 列数对齐：确保数据行与表头列数一致，避免错位
+    
     Args:
         position_key: 岗位类型关键字
         candidates: 候选人列表（已排序）
@@ -313,29 +318,41 @@ def write_position_excel(position_key, candidates, output_dir=None, dimensions=N
     degree_order = ['博士', '硕士', '本科', '大专', '专科', '高中', '中专']
     data_rows = []
     for candidate in candidates:
+        education = candidate.get('education', '')
         education_details = candidate.get('education_details', [])
+        education_detail_str = ''
         
-        if isinstance(education_details, str):
-            details_str = education_details.strip()
-        elif isinstance(education_details, list) and education_details:
-            highest_edu = None
-            highest_degree_index = len(degree_order)
+        if isinstance(education_details, list) and education_details:
+            edu_parts = []
             for edu in education_details:
                 if isinstance(edu, dict):
-                    degree = edu.get('degree', '')
-                    if degree in degree_order:
-                        index = degree_order.index(degree)
-                        if index < highest_degree_index:
-                            highest_degree_index = index
-                            highest_edu = edu
-            if highest_edu is None:
-                highest_edu = education_details[-1]
-            if isinstance(highest_edu, dict):
-                details_str = f"{highest_edu.get('start_year', '')}-{highest_edu.get('end_year', '')} {highest_edu.get('school', '')} {highest_edu.get('major', '')} {highest_edu.get('degree', '')}".strip()
-            else:
-                details_str = str(highest_edu).strip()
-        else:
-            details_str = ''
+                    if 'text' in edu:
+                        edu_parts.append(edu['text'])
+                    else:
+                        start_year = edu.get('start_year', '')
+                        end_year = edu.get('end_year', '')
+                        school = edu.get('school', '')
+                        major = edu.get('major', '')
+                        degree = edu.get('degree', '')
+                        
+                        year_part = f"{start_year}-{end_year} " if start_year and end_year else ""
+                        school_part = f"{school} " if school else ""
+                        major_part = f"{major} " if major else ""
+                        degree_part = degree if degree else ""
+                        
+                        edu_str = (year_part + school_part + major_part + degree_part).strip()
+                        if edu_str:
+                            edu_parts.append(edu_str)
+            
+            education_detail_str = '\n'.join(edu_parts)
+            
+            if not education:
+                for edu in education_details:
+                    if isinstance(edu, dict):
+                        degree = edu.get('degree', '')
+                        if degree in degree_order:
+                            education = degree
+                            break
         
         base_row = [
             candidate.get('rank', ''),
@@ -343,8 +360,8 @@ def write_position_excel(position_key, candidates, output_dir=None, dimensions=N
             candidate.get('phone', ''),
             candidate.get('gender', ''),
             candidate.get('age', ''),
-            candidate.get('education', ''),
-            details_str,
+            education,
+            education_detail_str,
             candidate.get('experience', ''),
             candidate.get('skills', ''),
             candidate.get('core_strengths', ''),
@@ -365,19 +382,58 @@ def write_position_excel(position_key, candidates, output_dir=None, dimensions=N
         if dimensions:
             for dim in dimensions:
                 dim_id = dim.get('id', '')
-                rating = dimension_scores.get(dim_id, '')
-                if rating != '':
-                    dim_detail = dimension_details.get(dim_id, {})
-                    if isinstance(dim_detail, dict):
-                        weighted_score = dim_detail.get('weighted_score', '')
-                        if weighted_score != '':
-                            dimension_values.append(f"{rating}/5 ({weighted_score}%)")
-                        else:
-                            dimension_values.append(f"{rating}/5")
+                dim_weight = dim.get('weight', 0)
+                dim_detail = dimension_details.get(dim_id, {})
+                
+                if isinstance(dim_detail, dict):
+                    score = dim_detail.get('score', '')
+                    weighted_score = dim_detail.get('weighted_score', '')
+                    
+                    if score != '':
+                        try:
+                            score_int = int(score)
+                            if dim_weight > 0 and weighted_score != '':
+                                try:
+                                    weighted_int = int(weighted_score)
+                                    dimension_values.append(f"{score_int}/5 ({weighted_int}%)")
+                                except (ValueError, TypeError):
+                                    weighted_percent = round((score_int / 5) * dim_weight)
+                                    dimension_values.append(f"{score_int}/5 ({weighted_percent}%)")
+                            elif dim_weight > 0:
+                                weighted_percent = round((score_int / 5) * dim_weight)
+                                dimension_values.append(f"{score_int}/5 ({weighted_percent}%)")
+                            else:
+                                dimension_values.append(f"{score_int}/5")
+                        except (ValueError, TypeError):
+                            dimension_values.append(f"{score}/5")
                     else:
-                        dimension_values.append(f"{rating}/5")
+                        score = dimension_scores.get(dim_id, '')
+                        if score != '':
+                            try:
+                                score_int = int(score)
+                                if dim_weight > 0:
+                                    weighted_percent = round((score_int / 5) * dim_weight)
+                                    dimension_values.append(f"{score_int}/5 ({weighted_percent}%)")
+                                else:
+                                    dimension_values.append(f"{score_int}/5")
+                            except (ValueError, TypeError):
+                                dimension_values.append(f"{score}/5")
+                        else:
+                            dimension_values.append('')
                 else:
-                    dimension_values.append('')
+                    score = dimension_scores.get(dim_id, '')
+                    if score != '':
+                        try:
+                            score_int = int(score)
+                            if dim_weight > 0:
+                                weighted_percent = round((score_int / 5) * dim_weight)
+                                dimension_values.append(f"{score_int}/5 ({weighted_percent}%)")
+                            else:
+                                dimension_values.append(f"{score_int}/5")
+                        except (ValueError, TypeError):
+                            dimension_values.append(f"{score}/5")
+                    else:
+                        dimension_values.append('')
         
         row = base_row[:match_score_index] + dimension_values + base_row[match_score_index:]
         data_rows.append(row)
@@ -433,6 +489,8 @@ def write_all_positions_excel(processed_results, output_dir=None, criteria_dict=
     为所有岗位写入Excel文件
     
     遍历处理后的评估结果，为每个岗位生成独立的Excel文件。
+    关键逻辑：从criteria_dict中获取每个岗位的评估维度，传递给write_position_excel
+    以实现动态维度列的显示。
     
     Args:
         processed_results: 处理后的评估结果
@@ -452,6 +510,14 @@ def write_all_positions_excel(processed_results, output_dir=None, criteria_dict=
         dimensions = None
         if criteria_dict and position_key in criteria_dict:
             dimensions = criteria_dict[position_key].get('dimensions', None)
+        elif candidates:
+            first_candidate = candidates[0]
+            dim_scores = first_candidate.get('dimension_scores', {})
+            if dim_scores:
+                dimensions = []
+                for dim_id, score in dim_scores.items():
+                    dimensions.append({'id': dim_id, 'name': f'维度{dim_id}', 'weight': 0})
+        
         filepath = write_position_excel(position_key, candidates, output_dir, dimensions)
         file_paths[position_key] = filepath
     

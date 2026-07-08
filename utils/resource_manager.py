@@ -81,10 +81,10 @@ def _discover_all_resources():
                     'dir_name': item
                 }
     
-    # 扫描评估标准目录
+    # 扫描评估标准目录（支持 .xlsx、.docx 和 .doc 格式）
     if os.path.exists(ASSESSMENT_CRITERIA_PATH):
         for filename in os.listdir(ASSESSMENT_CRITERIA_PATH):
-            if filename.endswith('.xlsx'):
+            if filename.endswith('.xlsx') or filename.endswith('.docx') or filename.endswith('.doc'):
                 resources['eval_docs'][filename] = {
                     'path': os.path.join(ASSESSMENT_CRITERIA_PATH, filename),
                     'filename': filename
@@ -229,9 +229,9 @@ def _local_fuzzy_match(user_input, resources):
     当LLM不可用时，使用字符串相似度和包含关系进行匹配。
     
     匹配策略：
-    1. 精确匹配
-    2. 包含匹配（输入在资源名中，或资源名在输入中）
-    3. 编辑距离相似度匹配
+    1. 精确匹配（不区分大小写）
+    2. 包含匹配（按匹配质量排序，优先返回前缀匹配和匹配比例高的结果）
+    3. 相似度匹配（综合编辑距离、带位置权重的字符重叠度和前缀匹配加分）
     
     Args:
         user_input: 用户输入的岗位名称
@@ -242,35 +242,76 @@ def _local_fuzzy_match(user_input, resources):
     """
     input_lower = user_input.lower()
     
-    # 1. 精确匹配
-    if user_input in resources:
-        logger.info(f"精确匹配成功: {user_input}")
-        return user_input
-    
-    # 2. 包含匹配
+    # 1. 精确匹配（统一使用lower，避免大小写不一致问题）
     for resource in resources.keys():
-        resource_lower = resource.lower()
-        if input_lower in resource_lower or resource_lower in input_lower:
-            logger.info(f"包含匹配成功: {user_input} -> {resource}")
+        if resource.lower() == input_lower:
+            logger.info(f"精确匹配成功: {user_input} -> {resource}")
             return resource
     
-    # 3. 编辑距离相似度匹配
+    # 2. 包含匹配（按匹配质量排序，返回最优结果）
+    containment_matches = []
+    for resource in resources.keys():
+        resource_lower = resource.lower()
+        
+        # 正向包含：输入是资源名的子串（更常见的场景）
+        if input_lower in resource_lower:
+            # 计算匹配质量：匹配位置越靠前越好，匹配比例越高越好
+            match_position = resource_lower.index(input_lower)
+            match_ratio = len(input_lower) / len(resource_lower)
+            
+            # 前缀匹配给予更高权重（位置0时权重加倍）
+            position_weight = 1.5 if match_position == 0 else 1.0
+            
+            # 综合得分：位置权重 * 匹配比例
+            score = position_weight * match_ratio
+            
+            containment_matches.append({
+                'resource': resource,
+                'score': score,
+                'type': 'forward'
+            })
+        
+        # 反向包含：资源名是输入的子串（可能是误匹配，给予较低权重）
+        elif resource_lower in input_lower:
+            match_ratio = len(resource_lower) / len(input_lower)
+            
+            # 反向包含给予惩罚权重（0.6倍），避免误匹配
+            score = 0.6 * match_ratio
+            
+            containment_matches.append({
+                'resource': resource,
+                'score': score,
+                'type': 'reverse'
+            })
+    
+    # 如果有包含匹配，按得分排序并返回最高分
+    if containment_matches:
+        containment_matches.sort(key=lambda x: x['score'], reverse=True)
+        best_match = containment_matches[0]['resource']
+        best_score = containment_matches[0]['score']
+        logger.info(f"包含匹配成功: {user_input} -> {best_match} (得分: {best_score:.2f}, "
+                    f"类型: {containment_matches[0]['type']})")
+        return best_match
+    
+    # 3. 相似度匹配（综合编辑距离、加权字符重叠度和前缀匹配加分）
     from difflib import SequenceMatcher
     
     best_score = 0
     best_match = None
     
     for resource in resources.keys():
-        # 使用SequenceMatcher计算相似度
-        score = SequenceMatcher(None, user_input, resource).ratio()
+        # 使用SequenceMatcher计算编辑距离相似度
+        edit_score = SequenceMatcher(None, user_input, resource).ratio()
         
-        # 字符重叠度
-        input_chars = set(user_input)
-        resource_chars = set(resource)
-        char_overlap = len(input_chars & resource_chars) / max(len(input_chars), len(resource_chars))
+        # 带位置权重的字符重叠度（解决set丢失关键区分信息的问题）
+        weighted_overlap = _calculate_weighted_char_overlap(user_input, resource)
         
-        # 综合得分（编辑距离 + 字符重叠度）
-        combined_score = (score + char_overlap) / 2
+        # 前缀匹配加分：如果资源名以前缀开头，给予额外分数
+        # 这能解决"前端开发"误匹配到"后端开发人员"的问题
+        prefix_bonus = _calculate_prefix_bonus(user_input, resource)
+        
+        # 综合得分：编辑距离(50%) + 加权字符重叠度(35%) + 前缀匹配(15%)
+        combined_score = 0.5 * edit_score + 0.35 * weighted_overlap + prefix_bonus
         
         if combined_score > best_score and combined_score >= 0.5:
             best_score = combined_score
@@ -282,6 +323,105 @@ def _local_fuzzy_match(user_input, resources):
     
     logger.warning(f"本地匹配也失败: {user_input}")
     return None
+
+
+def _calculate_weighted_char_overlap(input_str, resource_str):
+    """
+    计算带位置权重的字符重叠度
+    
+    相比简单的set交集，该算法给开头字符更高的权重，
+    使得"前端开发"匹配"前端测试人员"时，"前"和"端"（开头字符）
+    比"开"和"发"（后续字符）更重要，从而正确匹配语义更接近的资源。
+    
+    权重规则：
+    - 开头位置的字符权重最高（权重=1.0）
+    - 越往后的字符权重越低（线性衰减）
+    - 只计算输入字符串中存在的字符在资源字符串中的加权匹配
+    
+    Args:
+        input_str: 用户输入字符串
+        resource_str: 资源名称字符串
+        
+    Returns:
+        float: 加权字符重叠度（0-1）
+    """
+    if not input_str or not resource_str:
+        return 0.0
+    
+    input_chars = list(input_str)
+    resource_chars = list(resource_str)
+    
+    # 计算输入中每个字符的位置权重（开头权重最高）
+    total_weight = 0.0
+    matched_weight = 0.0
+    
+    for i, char in enumerate(input_chars):
+        # 位置权重：开头权重为1.0，线性衰减到末尾为0.5
+        position_weight = 1.0 - (i / len(input_chars)) * 0.5
+        
+        total_weight += position_weight
+        
+        # 检查该字符是否在资源中存在（不区分大小写）
+        if char.lower() in [c.lower() for c in resource_chars]:
+            matched_weight += position_weight
+    
+    # 处理total_weight为0的边界情况
+    if total_weight == 0:
+        return 0.0
+    
+    return matched_weight / total_weight
+
+
+def _calculate_prefix_bonus(input_str, resource_str):
+    """
+    计算前缀匹配加分
+    
+    如果资源名称以前缀开头（不区分大小写），给予额外分数，
+    前缀越长，加分越多。这能解决"前端开发"误匹配到"后端开发人员"的问题，
+    因为"前端测试人员"以"前端"开头，而"后端开发人员"不以"前端"开头。
+    
+    加分规则：
+    - 如果资源名以输入的前2个字符开头，基础加分0.15
+    - 如果资源名以输入的前3个字符开头，额外加分0.10
+    - 如果资源名以输入的前4个字符开头，再额外加分0.05
+    - 最大加分不超过0.30
+    - 如果资源名不以该前缀开头，加分 = 0
+    
+    Args:
+        input_str: 用户输入字符串
+        resource_str: 资源名称字符串
+        
+    Returns:
+        float: 前缀匹配加分（0-0.30）
+    """
+    if not input_str or not resource_str:
+        return 0.0
+    
+    input_lower = input_str.lower()
+    resource_lower = resource_str.lower()
+    
+    bonus = 0.0
+    
+    # 基础前缀匹配：资源名以输入的前2个字符开头
+    if len(input_str) >= 2 and resource_lower.startswith(input_lower[:2]):
+        bonus += 0.15
+        
+        # 更长前缀匹配：资源名以输入的前3个字符开头
+        if len(input_str) >= 3 and resource_lower.startswith(input_lower[:3]):
+            bonus += 0.10
+            
+            # 更长前缀匹配：资源名以输入的前4个字符开头
+            if len(input_str) >= 4 and resource_lower.startswith(input_lower[:4]):
+                bonus += 0.05
+    
+    # 反向前缀匹配：输入以资源名的前2个字符开头（权重较低）
+    if len(resource_str) >= 2 and input_lower.startswith(resource_lower[:2]):
+        bonus += 0.05
+        
+        if len(resource_str) >= 3 and input_lower.startswith(resource_lower[:3]):
+            bonus += 0.03
+    
+    return min(bonus, 0.30)
 
 
 def match_resume_dir(user_input):

@@ -76,12 +76,14 @@ def build_candidate_info_text(candidate):
 EVALUATION_INSTRUCTION = """请根据上述评估标准和动态权重计算规则，对候选人进行全面评估。
         
         评估要求：
-        1. 按照评估维度逐项分析，每个维度的达标标准包含多个子项，每符合一项得该项对应的分数（权重/子项数量）
-        2. 综合计算匹配度分数（0-100分），根据匹配度确定优先级等级（P0/P1/P2/P3）
-        3. 从项目经验和自我评价中总结候选人的意向（擅长）模块，用逗号分隔多个值。意向模块是指候选人擅长或有意向从事的业务领域/产品方向，常见类别包括但不限于：ERP（企业资源计划）、OA（办公自动化）、CRM（客户关系管理）、项目管理软件、HRM（人力资源管理）、SCM（供应链管理）、财务管理软件、BI（数据分析与商业智能）、企业协作与通讯软件、研发与产品生命周期管理（PLM）、供应链与制造执行系统（MES/WMS/TMS）、企业知识管理与文档系统（KMS/DMS）、客户服务与支持系统（SaaS客服）、电子合同与法务合规系统、IT服务与资产管理（ITSM/EAM）、流程自动化与低代码平台（BPM/iPaaS）。请根据候选人实际项目经验归纳，不要局限于上述类别
-        4. 从项目经验、个人评价、专业技能三方面提取前期信息了解内容
-        5. 分析候选人的核心优势和主要风险
-        6. 给出定级理由和建议动作
+        1. 按照评估维度逐项分析，每个维度的达标标准包含多个子项
+        2. 对每个维度进行0-5分评分（每符合1项+1分，最多5分），直接给出最终分数
+        3. 计算每个维度的加权分数：weighted_score = (维度分数 / 5) * dimension_weight
+        4. 综合计算匹配度分数（0-100分），即所有维度加权分数之和，根据匹配度确定优先级等级（P0/P1/P2/P3）
+        5. 从项目经验和自我评价中总结候选人的意向（擅长）模块，用逗号分隔多个值。意向模块是指候选人擅长或有意向从事的业务领域/产品方向，常见类别包括但不限于：ERP（企业资源计划）、OA（办公自动化）、CRM（客户关系管理）、项目管理软件、HRM（人力资源管理）、SCM（供应链管理）、财务管理软件、BI（数据分析与商业智能）、企业协作与通讯软件、研发与产品生命周期管理（PLM）、供应链与制造执行系统（MES/WMS/TMS）、企业知识管理与文档系统（KMS/DMS）、客户服务与支持系统（SaaS客服）、电子合同与法务合规系统、IT服务与资产管理（ITSM/EAM）、流程自动化与低代码平台（BPM/iPaaS）。请根据候选人实际项目经验归纳，不要局限于上述类别
+        6. 从项目经验、个人评价、专业技能三方面提取前期信息了解内容
+        7. 分析候选人的核心优势和主要风险
+        8. 给出定级理由和建议动作
         
         请按照以下JSON格式输出评估结果（注意：以下仅为格式示例，match_score和priority必须根据候选人实际情况计算，不要照搬示例数值）：
         {
@@ -98,31 +100,46 @@ EVALUATION_INSTRUCTION = """请根据上述评估标准和动态权重计算规�
             "intention_modules": "ERP,财务系统,数据可视化",
             "preliminary_info": "5年前端开发经验，精通Vue3+TypeScript，有组件库开发经验",
             "dimension_scores": {
-                "D1": 70,
-                "D2": 75,
-                "D3": 68,
-                "D4": 72
+                "D1": 3,
+                "D2": 5,
+                "D3": 4,
+                "D4": 3
             },
             "dimension_details": {
                 "D1": {
-                    "matched_items": 3,
-                    "total_items": 5,
-                    "score": 18,
+                    "score": 3,
+                    "weighted_score": 18,
+                    "comments": "符合3项达标标准"
+                },
+                "D2": {
+                    "score": 5,
+                    "weighted_score": 20,
+                    "comments": "全部符合"
+                },
+                "D3": {
+                    "score": 4,
+                    "weighted_score": 20,
+                    "comments": "符合4项达标标准"
+                },
+                "D4": {
+                    "score": 3,
+                    "weighted_score": 15,
                     "comments": "符合3项达标标准"
                 }
             }
         }
         
         注意：
-        - match_score必须是0-100的整数，需根据动态权重规则计算，严禁直接使用示例中的数值
+        - match_score必须是0-100的整数，等于所有维度weighted_score之和，严禁直接使用示例中的数值
         - priority必须是P0/P1/P2/P3之一，根据match_score确定：85分以上P0，70-84分P1，50-69分P2，50分以下P3
         - phone、gender、age、education请从简历文本中提取，若简历中未提及则填空字符串
         - intention_modules是从项目经验、自我评价中总结的擅长模块，多个用逗号分隔，如"ERP,CRM,项目管理软件"等
         - preliminary_info是从项目经验、个人评价、专业技能中提取的综合信息
         - core_strengths和main_risks请用简明扼要的语言描述
         - rating_reason是定级理由，说明为何给出该优先级
-        - dimension_scores中的D1-D4对应各评估维度的评分（0-100）
-        - dimension_details是各维度的详细匹配情况
+        - dimension_scores中的D1-D4对应各评估维度的0-5分评分
+        - dimension_details必须包含每个维度的score（0-5分）、weighted_score和comments字段
+        - weighted_score = (score / 5) * dimension_weight，结果保留整数
         - 只输出JSON，不要输出其他内容
         """
 
