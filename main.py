@@ -51,9 +51,9 @@ def print_progress(current, total, task_name):
     print(f"\r{task_name}: [{bar}] {progress:.1f}% ({current}/{total})", end='')
 
 
-def evaluate_candidate(candidate, position_key, use_llm=False, use_local=False):
+def evaluate_candidate(candidate, position_key, use_llm=False, use_local=False, criteria=None):
     """
-    璇勪及单个候选人
+    评估单个候选人
     
     根据参数选择评估方式：
     - use_local=True: 使用本地LLM模型评估
@@ -65,11 +65,15 @@ def evaluate_candidate(candidate, position_key, use_llm=False, use_local=False):
         position_key: 职位关键字
         use_llm: 是否使用远程LLM
         use_local: 是否使用本地LLM
+        criteria: 预读取的评估标准（可选），避免重复读取
         
     Returns:
         dict: 评估结果
     """
     try:
+        if criteria is None:
+            criteria = get_all_evaluation_criteria().get(position_key, {})
+        
         if use_local:
             prompt = build_evaluation_prompt(candidate, position_key, use_local=True)
             response = call_local_model(prompt)
@@ -78,7 +82,6 @@ def evaluate_candidate(candidate, position_key, use_llm=False, use_local=False):
                 result = parse_llm_response(response)
                 if result:
                     priority = result.get('priority', 'P3')
-                    criteria = get_all_evaluation_criteria().get(position_key, {})
                     priority_levels = criteria.get('priority_levels', [])
                     
                     action_from_doc = ''
@@ -103,7 +106,6 @@ def evaluate_candidate(candidate, position_key, use_llm=False, use_local=False):
                 result = parse_llm_response(response)
                 if result:
                     priority = result.get('priority', 'P3')
-                    criteria = get_all_evaluation_criteria().get(position_key, {})
                     priority_levels = criteria.get('priority_levels', [])
                     
                     action_from_doc = ''
@@ -119,7 +121,6 @@ def evaluate_candidate(candidate, position_key, use_llm=False, use_local=False):
                 logger.warning(f"解析远程LLM响应失败: {position_key} - {candidate.get('name', 'unknown')}")
         
         # 默认规则评估（按维度计算）
-        criteria = get_all_evaluation_criteria().get(position_key, {})
         dimensions = criteria.get('dimensions', [])
         
         match_score = 0
@@ -206,7 +207,7 @@ def evaluate_candidate(candidate, position_key, use_llm=False, use_local=False):
         }
 
 
-def evaluate_all_candidates(candidates, position_key, use_llm=False, use_local=False):
+def evaluate_all_candidates(candidates, position_key, use_llm=False, use_local=False, criteria=None):
     """
     评估所有候选人
     
@@ -215,6 +216,7 @@ def evaluate_all_candidates(candidates, position_key, use_llm=False, use_local=F
         position_key: 职位关键字
         use_llm: 是否使用远程LLM
         use_local: 是否使用本地LLM
+        criteria: 预读取的评估标准（可选），避免重复读取
         
     Returns:
         list: 评估结果列表
@@ -223,7 +225,7 @@ def evaluate_all_candidates(candidates, position_key, use_llm=False, use_local=F
     total = len(candidates)
     
     for idx, candidate in enumerate(candidates, 1):
-        result = evaluate_candidate(candidate, position_key, use_llm, use_local)
+        result = evaluate_candidate(candidate, position_key, use_llm, use_local, criteria)
         
         evaluated.append({
             **candidate,
@@ -380,7 +382,8 @@ def run_evaluation(use_llm=False, use_local=False, positions=None):
         
         logger.info(f"  正在评估 {position}岗位 ({len(candidates)}人)...")
         
-        evaluated = evaluate_all_candidates(candidates, position, use_llm, use_local)
+        criteria = all_criteria.get(position, {})
+        evaluated = evaluate_all_candidates(candidates, position, use_llm, use_local, criteria)
         all_evaluated[position] = evaluated
         
         total_processed += len(evaluated)
