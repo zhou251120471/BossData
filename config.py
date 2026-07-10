@@ -65,7 +65,7 @@ LLM_CONFIG = {
     'temperature': 0.1,
     'max_tokens': 2000,
     'max_retries': 3,
-    'timeout_connect': 15,
+    'timeout_connect': 80,
     'timeout_read': 120,
     'system_prompt': '你是一个专业的技术招聘评估专家，擅长根据岗位要求对候选人进行客观、准确的评估。',
     
