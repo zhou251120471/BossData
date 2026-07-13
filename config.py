@@ -64,10 +64,10 @@ LLM_CONFIG = {
     # 'model': 'qwen3.7-plus',
     'model': 'qwen3.7-plus',
     'temperature': 0.1,
-    'max_tokens': 2000,
-    'max_retries': 3,
-    'timeout_connect': 80,
-    'timeout_read': 120,
+    'max_tokens': 4000,
+    'max_retries': 4,
+    'timeout_connect': 120,
+    'timeout_read': 300,
     'system_prompt': '你是一个专业的技术招聘评估专家，擅长根据岗位要求对候选人进行客观、准确的评估。',
     
     'prompt_template': {

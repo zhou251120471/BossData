@@ -22,6 +22,8 @@ import json
 import logging
 import requests
 import time
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from config import LLM_CONFIG, PRIORITY_LEVELS
 from utils.evaluation_parser import get_evaluation_criteria, format_evaluation_criteria
 from utils.prompt_templates import build_candidate_info_text, EVALUATION_INSTRUCTION, LOCAL_EVALUATION_INSTRUCTION, EVALUATION_SYSTEM_PROMPT
@@ -69,13 +71,52 @@ def build_evaluation_prompt(candidate, position_key, use_local=False):
     return prompt
 
 
+def _create_retry_session(max_retries=4, backoff_factor=1.0):
+    """
+    创建带重试策略的requests.Session对象
+    
+    使用urllib3.Retry配置细粒度的重试策略，支持按错误类型区分重试行为：
+    - 仅对ReadTimeout、429(限流)、503(服务不可用)、504(网关超时)进行重试
+    - 对ConnectTimeout快速失败，不进行重试（网络不可达重试无意义）
+    - 采用指数退避策略，避免请求风暴
+    
+    Args:
+        max_retries: 最大重试次数（不含首次请求）
+        backoff_factor: 退避因子，重试间隔 = backoff_factor * (2 ** (attempt - 1))
+        
+    Returns:
+        requests.Session: 配置好重试策略的Session对象
+    """
+    retry_strategy = Retry(
+        total=max_retries,
+        read=max_retries,
+        connect=0,
+        status=max_retries,
+        status_forcelist=[429, 503, 504],
+        allowed_methods=["POST"],
+        backoff_factor=backoff_factor
+    )
+    
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session = requests.Session()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    
+    return session
+
+
 def call_llm_api(prompt, config=None):
     """
     调用大模型API进行评估
     
     使用OpenAI兼容的Chat Completions API格式调用大模型。
     如果API配置不完整（缺少api_base或api_key），则返回None。
-    支持自动重试机制，当调用失败时最多重试3次，采用指数退避策略。
+    支持自动重试机制，当调用失败时最多重试配置的次数，采用指数退避策略。
+    
+    超时处理策略：
+    - ConnectTimeout（连接超时）：表示网络不可达，直接快速失败，不重试
+    - ReadTimeout（读取超时）：表示服务器响应慢，进行指数退避重试
+    - 限流错误(429)、服务不可用(503)、网关超时(504)：进行指数退避重试
     
     Args:
         prompt: Prompt文本
@@ -94,9 +135,9 @@ def call_llm_api(prompt, config=None):
         logger.warning("大模型API配置不完整，使用本地规则评估")
         return None
     
-    max_retries = config.get('max_retries', 3)
-    timeout_connect = config.get('timeout_connect', 15)
-    timeout_read = config.get('timeout_read', 120)
+    max_retries = config.get('max_retries', 4)
+    timeout_connect = config.get('timeout_connect', 120)
+    timeout_read = config.get('timeout_read', 300)
     timeout = (timeout_connect, timeout_read)
     
     headers = {
@@ -119,12 +160,14 @@ def call_llm_api(prompt, config=None):
             }
         ],
         'temperature': config.get('temperature', 0.1),
-        'max_tokens': config.get('max_tokens', 2000)
+        'max_tokens': config.get('max_tokens', 4000)
     }
     
-    for attempt in range(max_retries):
+    session = _create_retry_session(max_retries=max_retries, backoff_factor=2.0)
+    
+    for attempt in range(max_retries + 1):
         try:
-            response = requests.post(
+            response = session.post(
                 f'{api_base}/chat/completions',
                 headers=headers,
                 json=payload,
@@ -138,25 +181,64 @@ def call_llm_api(prompt, config=None):
             if 'choices' in result and len(result['choices']) > 0:
                 return result['choices'][0]['message']['content']
             
+            logger.warning("大模型API返回空结果")
             return None
         
-        except requests.exceptions.Timeout:
-            logger.warning(f"调用大模型API超时，第{attempt+1}/{max_retries}次尝试")
-            if attempt < max_retries - 1:
-                time.sleep(2 * (attempt + 1))
+        except requests.exceptions.ConnectTimeout:
+            logger.error(f"调用大模型API连接超时（{timeout_connect}秒），网络不可达，请检查网络连接或代理配置")
+            return None
+        
+        except requests.exceptions.ReadTimeout:
+            logger.warning(f"调用大模型API读取超时（{timeout_read}秒），第{attempt+1}/{max_retries+1}次尝试")
+            if attempt < max_retries:
+                sleep_time = 2 ** attempt
+                logger.info(f"等待{sleep_time}秒后重试...")
+                time.sleep(sleep_time)
                 continue
             else:
-                logger.error(f"调用大模型API超时，已达最大重试次数{max_retries}")
+                logger.error(f"调用大模型API读取超时，已达最大重试次数{max_retries}")
+                return None
+        
+        except requests.exceptions.HTTPError as e:
+            status_code = e.response.status_code if e.response else 0
+            if status_code == 429:
+                logger.warning(f"调用大模型API触发限流(429)，第{attempt+1}/{max_retries+1}次尝试")
+                if attempt < max_retries:
+                    sleep_time = 2 ** attempt * 4
+                    logger.info(f"限流等待{sleep_time}秒后重试...")
+                    time.sleep(sleep_time)
+                    continue
+                else:
+                    logger.error(f"调用大模型API触发限流，已达最大重试次数{max_retries}")
+                    return None
+            elif status_code in [503, 504]:
+                logger.warning(f"调用大模型API服务不可用({status_code})，第{attempt+1}/{max_retries+1}次尝试")
+                if attempt < max_retries:
+                    sleep_time = 2 ** attempt
+                    logger.info(f"等待{sleep_time}秒后重试...")
+                    time.sleep(sleep_time)
+                    continue
+                else:
+                    logger.error(f"调用大模型API服务不可用({status_code})，已达最大重试次数{max_retries}")
+                    return None
+            else:
+                logger.error(f"调用大模型APIHTTP错误({status_code}): {str(e)}")
+                return None
+        
+        except requests.exceptions.RequestException as e:
+            logger.error(f"调用大模型API网络请求异常: {str(e)}")
+            if attempt < max_retries:
+                sleep_time = 2 ** attempt
+                logger.info(f"等待{sleep_time}秒后重试...")
+                time.sleep(sleep_time)
+                continue
+            else:
+                logger.error(f"调用大模型API网络请求异常，已达最大重试次数{max_retries}: {str(e)}")
                 return None
         
         except Exception as e:
-            logger.warning(f"调用大模型API失败，第{attempt+1}/{max_retries}次尝试，错误: {str(e)}")
-            if attempt < max_retries - 1:
-                time.sleep(2 * (attempt + 1))
-                continue
-            else:
-                logger.error(f"调用大模型API失败，已达最大重试次数{max_retries}: {str(e)}")
-                return None
+            logger.error(f"调用大模型API未知错误: {str(e)}")
+            return None
 
 
 def parse_llm_response(response_text):
