@@ -22,3 +22,8 @@ sentencepiece>=0.1.99
 protobuf>=3.20.0
 safetensors>=0.4.0
 tokenizers>=0.13.0
+
+# OCR and PDF processing dependencies
+pillow>=10.0.0
+pypdfium2>=5.0.0
+easyocr>=1.7.0

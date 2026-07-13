@@ -61,6 +61,7 @@ LLM_CONFIG = {
     'api_key': 'sk-e0453f8ef23b4d80b7f89445fd251afc',
     # 'model': 'qwen-max',
     # 'model': 'qwen3.7-max',
+    # 'model': 'qwen3.7-plus',
     'model': 'qwen3.7-plus',
     'temperature': 0.1,
     'max_tokens': 2000,

@@ -136,24 +136,37 @@ def evaluate_candidate(candidate, position_key, use_llm=False, use_local=False, 
             dim_weight = dim.get('weight', 0)
             items = dim.get('standard_items', [])
             
-            matched_items = []
+            keywords = []
             for item in items:
-                if item and item.lower() in full_text:
-                    matched_items.append(item)
+                if item:
+                    sub_keywords = re.split(r'[/+、,，;；()（）·\s]+', item)
+                    for kw in sub_keywords:
+                        kw = kw.strip()
+                        if kw and len(kw) >= 2:
+                            keywords.append(kw)
             
-            dim_score = len(matched_items)
+            matched_keywords = []
+            for kw in keywords:
+                if kw.lower() in full_text:
+                    matched_keywords.append(kw)
+            
+            total_keywords = len(keywords) if keywords else 1
+            match_ratio = len(matched_keywords) / total_keywords if total_keywords > 0 else 0
+            
             max_score = 5
+            dim_score = int(match_ratio * max_score)
             
             if dim_score > max_score:
                 dim_score = max_score
             
-            weighted_score = int((dim_score / max_score) * dim_weight)
+            weighted_score = int(match_ratio * dim_weight)
             
             dimension_scores[dim_id] = dim_score
             dimension_details[dim_id] = {
-                'matched_items': len(matched_items),
-                'total_items': len(items),
-                'weighted_score': str(weighted_score)
+                'matched_items': len(matched_keywords),
+                'total_items': total_keywords,
+                'weighted_score': str(weighted_score),
+                'matched_keywords': matched_keywords[:5]
             }
             
             match_score += weighted_score

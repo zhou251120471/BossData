@@ -4,7 +4,7 @@
 
 ## 功能特点
 
-- 📄 **多格式简历读取**：支持PDF格式简历文本提取（优先使用PyMuPDF）
+- 📄 **多格式简历读取**：支持文本PDF和图片PDF（扫描件），图片PDF使用EasyOCR提取
 - 📋 **评估标准解析**：从Excel文件解析评估维度和优先级等级标准
 - 🤖 **智能评估**：支持两种评估模式
   - 远程大模型评估（阿里云百炼API）
@@ -545,13 +545,36 @@ for resource in resources.keys():
 
 #### 6.1 PDF文本提取逻辑
 
+系统自动识别PDF类型并选择合适的提取方式：
+
 ```
-优先使用PyMuPDF（fitz）解析PDF：
-  ├─ 成功 → 返回提取的文本
-  └─ 失败 → 回退到PyPDF2解析
-     ├─ 成功 → 返回提取的文本
-     └─ 失败 → 返回空字符串，记录错误日志
+使用PyMuPDF（fitz）打开PDF：
+  ├─ 检测是否为图片PDF（扫描件）：
+  │   ├─ PDF包含图片且文本很少 → 是图片PDF
+  │   ├─ 文本包含乱码模式（~~） → 是图片PDF
+  │   └─ 文本不含中文/英文 → 是图片PDF
+  │   
+  │   图片PDF处理：
+  │   ├─ 使用pypdfium2渲染PDF页面为图片
+  │   ├─ 使用EasyOCR进行OCR识别
+  │   ├─ 自动检测GPU（CUDA），可用则加速
+  │   └─ 返回提取的文本
+  │   
+  └─ 文本PDF处理：
+      ├─ 使用PyMuPDF直接提取文本
+      ├─ 若文本过少，尝试pypdfium2提取
+      └─ 失败时回退到PyPDF2解析
 ```
+
+**图片PDF检测规则**：
+- 如果PDF包含图片且文本长度<500字符
+- 如果文本包含乱码模式（如`~~`）且字符种类很少
+- 如果文本不包含任何中文和英文字符
+
+**GPU加速支持**：
+- EasyOCR自动检测CUDA是否可用
+- 可用则使用GPU加速（识别速度提升3-5倍）
+- 不可用则使用CPU运行（速度较慢）
 
 #### 6.2 文件名解析逻辑
 
@@ -1169,7 +1192,11 @@ EVALUATION_DIMENSIONS = {
 |------|------|
 | PyMuPDF (fitz) | PDF文本提取（优先） |
 | PyPDF2 | PDF文本提取（备选） |
+| pypdfium2 | PDF页面渲染为图片（图片PDF处理） |
+| easyocr | OCR文本识别（图片PDF扫描件处理） |
+| pillow | 图像处理 |
 | openpyxl | Excel文件读写 |
+| python-docx | Word文档解析 |
 | requests | HTTP请求（远程API） |
 | transformers | 本地模型加载与推理 |
 | torch | PyTorch深度学习框架 |

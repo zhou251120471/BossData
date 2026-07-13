@@ -36,13 +36,158 @@ except ImportError:
 from config import RESUMES_PATH
 
 
+def _is_image_pdf(doc):
+    """
+    判断PDF是否为图片PDF（扫描件）
+    
+    图片PDF的特征：
+    1. 每页包含大量图片
+    2. 文本内容很少或为乱码（包含大量非中文/英文字符）
+    3. 文本块数量远少于图片块数量
+    
+    判断逻辑：
+    - 如果PDF包含图片且文本长度小于500字符，可能是图片PDF
+    - 如果文本中包含重复的特殊字符模式（如~~）且字符种类很少，可能是乱码
+    - 如果文本中不包含任何中文字符且不包含任何英文字母，可能是乱码
+    
+    Args:
+        doc: fitz.Document对象
+        
+    Returns:
+        bool: True表示是图片PDF，False表示是文本PDF
+    """
+    total_text_length = 0
+    total_image_count = 0
+    
+    for page in doc:
+        text = page.get_text()
+        total_text_length += len(text)
+        
+        images = page.get_images(full=True)
+        total_image_count += len(images)
+    
+    # 如果没有图片，直接返回False
+    if total_image_count == 0:
+        return False
+    
+    # 如果文本足够长（超过500字符），且包含中文或英文，不是图片PDF
+    if total_text_length >= 500:
+        text = doc[0].get_text()[:500]
+        has_chinese = any('\u4e00' <= char <= '\u9fff' for char in text)
+        has_english = any('a' <= char.lower() <= 'z' for char in text)
+        if has_chinese or has_english:
+            return False
+    
+    # 如果每页平均图片数大于0且文本很少，可能是图片PDF
+    if total_image_count > 0 and total_text_length < 500:
+        return True
+    
+    # 检查文本是否为乱码（包含大量重复的特殊字符模式）
+    if total_text_length > 0:
+        text = doc[0].get_text()[:200]
+        
+        # 如果包含~~模式且字符种类很少，是乱码
+        if '~~' in text and len(set(text)) < 50:
+            return True
+        
+        # 如果不包含任何中文和英文，可能是乱码
+        has_chinese = any('\u4e00' <= char <= '\u9fff' for char in text)
+        has_english = any('a' <= char.lower() <= 'z' for char in text)
+        if not has_chinese and not has_english:
+            return True
+    
+    return False
+
+def _extract_text_with_easyocr(pdf_path):
+    """
+    使用EasyOCR从图片PDF中提取文本
+    
+    使用pypdfium2渲染PDF页面为图片，然后使用EasyOCR进行OCR识别。
+    EasyOCR不需要额外安装系统级OCR引擎，支持中文识别。
+    
+    Args:
+        pdf_path: PDF文件的完整路径
+        
+    Returns:
+        str: 提取的文本内容，如果OCR不可用返回空字符串
+    """
+    try:
+        import easyocr
+        import numpy as np
+        import pypdfium2 as pdfium
+        
+        import torch
+        use_gpu = torch.cuda.is_available()
+        if use_gpu:
+            logger.info(f"检测到GPU可用，使用GPU加速EasyOCR")
+        else:
+            logger.info(f"未检测到GPU，使用CPU运行EasyOCR")
+        
+        reader = easyocr.Reader(['ch_sim', 'en'], gpu=use_gpu)
+        
+        pdf = pdfium.PdfDocument(pdf_path)
+        full_text = ''
+        
+        for page_num in range(len(pdf)):
+            page = pdf[page_num]
+            pil_image = page.render(scale=2.0).to_pil()
+            
+            image_np = np.array(pil_image)
+            
+            results = reader.readtext(image_np)
+            
+            page_text = ''
+            for (bbox, text, confidence) in results:
+                page_text += text + ' '
+            
+            full_text += page_text + '\n'
+            
+            logger.debug(f"EasyOCR第{page_num+1}页OCR提取完成，置信度: {[round(c, 2) for _, _, c in results]}")
+        
+        pdf.close()
+        
+        if full_text.strip():
+            logger.info(f"EasyOCR提取成功，文本长度: {len(full_text)}")
+            return full_text.strip()
+        
+        return ''
+        
+    except Exception as e:
+        logger.debug(f"EasyOCR提取失败: {str(e)}")
+        return ''
+
+def _extract_text_with_ocr(pdf_path):
+    """
+    使用OCR从图片PDF中提取文本
+    
+    使用EasyOCR进行OCR识别，无需额外安装系统级OCR引擎。
+    
+    Args:
+        pdf_path: PDF文件的完整路径
+        
+    Returns:
+        str: 提取的文本内容，如果OCR不可用返回空字符串
+    """
+    text = _extract_text_with_easyocr(pdf_path)
+    if text:
+        return text
+    
+    logger.error(f"OCR提取失败，无法提取图片PDF内容: {pdf_path}")
+    return ''
+
 def extract_text_from_pdf(pdf_path):
     """
     从PDF文件中提取文本内容
     
-    优先使用PyMuPDF（fitz）库解析PDF，因其对中文编码和复杂格式支持更好；
-    当PyMuPDF不可用或解析失败时，回退到PyPDF2库。
-    若解析过程中发生异常（如文件损坏、加密等），记录错误日志并返回空字符串。
+    支持三种提取方式：
+    1. 文本PDF：直接提取文本内容
+    2. 图片PDF（扫描件）：使用EasyOCR提取文本
+    3. 加密/损坏PDF：返回空字符串并记录错误
+    
+    检测逻辑：
+    - 如果PDF包含图片且文本很少，判定为图片PDF
+    - 如果提取的文本为乱码（包含大量重复特殊字符），判定为图片PDF
+    - 图片PDF使用EasyOCR提取，OCR不可用时返回空字符串
     
     Args:
         pdf_path: PDF文件的完整路径
@@ -53,13 +198,74 @@ def extract_text_from_pdf(pdf_path):
     if HAS_FITZ:
         try:
             doc = fitz.open(pdf_path)
+            
+            # 检查是否为图片PDF
+            if _is_image_pdf(doc):
+                logger.info(f"检测到图片PDF（扫描件），尝试OCR提取: {pdf_path}")
+                doc.close()
+                ocr_text = _extract_text_with_ocr(pdf_path)
+                if ocr_text:
+                    return ocr_text
+                
+                # OCR不可用时，尝试用pypdfium2直接渲染提取
+                try:
+                    import pypdfium2 as pdfium
+                    
+                    pdf = pdfium.PdfDocument(pdf_path)
+                    full_text = ''
+                    
+                    for page_num in range(len(pdf)):
+                        page = pdf[page_num]
+                        text = page.get_textpage().get_text_range()
+                        if text:
+                            full_text += text
+                    
+                    pdf.close()
+                    if len(full_text) > 100:
+                        logger.info(f"pypdfium2提取成功，文本长度: {len(full_text)}")
+                        return full_text.strip()
+                except Exception as e:
+                    logger.warning(f"pypdfium2提取失败: {str(e)}")
+                
+                # 所有方式都失败，返回原始乱码（至少保留文件名解析的信息）
+                doc = fitz.open(pdf_path)
+                text = ''
+                for page in doc:
+                    text += page.get_text()
+                doc.close()
+                return text.strip()
+            
+            # 正常文本PDF，直接提取
             text = ''
             for page in doc:
                 page_text = page.get_text()
                 if page_text:
                     text += page_text
             doc.close()
+            
+            # 二次检查：如果文本很短或为乱码，尝试pypdfium2
+            if len(text) < 100:
+                logger.warning(f"提取的文本内容过少，尝试pypdfium2: {pdf_path}")
+                try:
+                    import pypdfium2 as pdfium
+                    
+                    pdf = pdfium.PdfDocument(pdf_path)
+                    full_text = ''
+                    
+                    for page_num in range(len(pdf)):
+                        page = pdf[page_num]
+                        text = page.get_textpage().get_text_range()
+                        if text:
+                            full_text += text
+                    
+                    pdf.close()
+                    if len(full_text) > 100:
+                        return full_text.strip()
+                except Exception as e:
+                    logger.warning(f"pypdfium2提取失败: {str(e)}")
+            
             return text.strip()
+            
         except Exception as e:
             logger.warning(f"PyMuPDF解析PDF失败: {pdf_path}, 错误: {str(e)}，尝试使用PyPDF2")
     
@@ -496,6 +702,76 @@ def get_position_list():
     return list(position_dirs.keys())
 
 
+def _is_meaningful_text(text):
+    """
+    判断文本是否包含有意义的内容
+    
+    有意义的文本应该包含中文或英文单词。PDF右上角的编码（如2dda6d36d6d0a5ae1HJ73t）
+    是PDF的元数据，不是乱码，不应影响正文内容的检测。
+    
+    判断逻辑：
+    1. 空文本直接返回False
+    2. 如果文本包含中文字符（中文字符范围：\u4e00-\u9fff），认为是有意义的
+    3. 如果文本包含纯英文单词（不包含数字，长度>=4），认为是有意义的
+    4. 如果文本长度很长（>200字符）且不包含中文或纯英文单词，认为是乱码
+    5. 编码乱码特征：纯字母数字组合且不包含中文，长度>100，认为是乱码
+    
+    Args:
+        text: 待检测的文本内容
+        
+    Returns:
+        bool: True表示文本包含有意义的内容，False表示文本可能是乱码
+    """
+    if not text or len(text.strip()) == 0:
+        return False
+    
+    text = text.strip()
+    
+    # 检查是否包含中文字符（优先级最高）
+    has_chinese = False
+    chinese_count = 0
+    for char in text:
+        if '\u4e00' <= char <= '\u9fff':
+            has_chinese = True
+            chinese_count += 1
+    
+    if has_chinese:
+        # 如果中文数量很少且文本很短，不调用LLM
+        if chinese_count >= 5 or len(text) >= 30:
+            return True
+    
+    # 检查是否包含纯英文单词（不包含数字，长度>=4）
+    import re
+    # 匹配纯字母单词（不包含数字）
+    pure_english_words = re.findall(r'\b[a-zA-Z]{4,}\b', text)
+    
+    if pure_english_words:
+        # 检查是否包含常见的英文单词
+        common_words = {'name', 'phone', 'email', 'experience', 'education', 'skill', 'project', 'summary', 'company', 'degree', 'university', 'college', 'major', 'year', 'month', 'day', 'resume', 'cv', 'developer', 'engineer', 'manager', 'designer', 'analyst', 'senior', 'junior', 'full', 'stack', 'frontend', 'backend', 'python', 'java', 'javascript', 'react', 'vue', 'angular', 'sql', 'mysql', 'postgresql', 'mongodb', 'redis', 'docker', 'kubernetes', 'aws', 'azure', 'gcp'}
+        for word in pure_english_words:
+            if word.lower() in common_words:
+                return True
+        
+        # 如果有多个纯英文单词（>=3个），认为是有意义的
+        if len(pure_english_words) >= 3:
+            return True
+    
+    # 如果文本长度很长且不包含中文或纯英文单词，认为是乱码
+    if len(text) > 200:
+        return False
+    
+    # 检查是否是编码乱码（纯字母数字组合，长度>100）
+    # 编码乱码的特征：只包含字母和数字，没有空格或标点分隔，长度很长
+    has_spaces = ' ' in text or '\n' in text or '\t' in text
+    if not has_spaces and len(text) > 100:
+        # 检查是否主要是字母数字组合
+        alphanumeric_ratio = sum(1 for c in text if c.isalnum()) / len(text)
+        if alphanumeric_ratio > 0.9:
+            return False
+    
+    # 短文本或只有编码的文本，不调用LLM
+    return False
+
 def extract_candidate_info_with_llm(resume_text):
     """
     使用大模型提取候选人信息
@@ -505,12 +781,20 @@ def extract_candidate_info_with_llm(resume_text):
     
     如果大模型调用失败或返回结果不完整，回退到传统的正则表达式提取方法。
     
+    优化：在调用LLM之前，先检查文本是否包含有意义的内容。
+    如果文本是乱码或内容过少，直接回退到传统方法，避免浪费API调用。
+    
     Args:
         resume_text: 简历文本内容
         
     Returns:
         dict: 包含提取结果的字典
     """
+    # 先检查文本是否包含有意义的内容
+    if not _is_meaningful_text(resume_text):
+        logger.info(f"简历文本内容无效（乱码或内容过少），直接使用传统方法提取，文本长度: {len(resume_text)}")
+        return extract_candidate_info_from_text(resume_text)
+    
     try:
         from llm.resume_extractor import extract_resume_info_with_llm as llm_extract
         
