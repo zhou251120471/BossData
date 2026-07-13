@@ -23,6 +23,7 @@ import argparse
 import logging
 import logging.config
 import time
+import re
 
 from config import LOGGING_CONFIG, LLM_CONFIG, PRIORITY_LEVELS
 from utils.resume_reader import get_all_resumes, get_position_list, read_resumes_for_position_with_llm, read_resumes_for_position

@@ -70,31 +70,39 @@ def _is_image_pdf(doc):
     if total_image_count == 0:
         return False
     
+    first_page_text = doc[0].get_text()[:500]
+    
+    # 检查文本是否为乱码（包含大量重复的特殊字符模式）
+    # 如果包含~~模式且字符种类很少，是乱码
+    if '~~' in first_page_text and len(set(first_page_text)) < 50:
+        return True
+    
+    # 如果不包含任何中文和英文，是乱码
+    has_chinese = any('\u4e00' <= char <= '\u9fff' for char in first_page_text)
+    has_english = any('a' <= char.lower() <= 'z' for char in first_page_text)
+    if not has_chinese and not has_english:
+        return True
+    
+    # 检查是否是重复的编码字符串（如801b65ee9281a84a1HJ73t~~重复出现）
+    import re
+    # 匹配类似 801b65ee9281a84a1HJ73t 的十六进制/编码模式
+    hex_pattern = r'[0-9a-fA-F]{8,}[A-Za-z0-9]{8,}'
+    hex_matches = re.findall(hex_pattern, first_page_text)
+    if len(hex_matches) >= 3:
+        # 如果有多个长编码字符串，很可能是乱码
+        unique_matches = set(hex_matches)
+        if len(unique_matches) <= 3:
+            # 且重复出现相同的编码，是乱码
+            return True
+    
     # 如果文本足够长（超过500字符），且包含中文或英文，不是图片PDF
     if total_text_length >= 500:
-        text = doc[0].get_text()[:500]
-        has_chinese = any('\u4e00' <= char <= '\u9fff' for char in text)
-        has_english = any('a' <= char.lower() <= 'z' for char in text)
         if has_chinese or has_english:
             return False
     
     # 如果每页平均图片数大于0且文本很少，可能是图片PDF
     if total_image_count > 0 and total_text_length < 500:
         return True
-    
-    # 检查文本是否为乱码（包含大量重复的特殊字符模式）
-    if total_text_length > 0:
-        text = doc[0].get_text()[:200]
-        
-        # 如果包含~~模式且字符种类很少，是乱码
-        if '~~' in text and len(set(text)) < 50:
-            return True
-        
-        # 如果不包含任何中文和英文，可能是乱码
-        has_chinese = any('\u4e00' <= char <= '\u9fff' for char in text)
-        has_english = any('a' <= char.lower() <= 'z' for char in text)
-        if not has_chinese and not has_english:
-            return True
     
     return False
 
